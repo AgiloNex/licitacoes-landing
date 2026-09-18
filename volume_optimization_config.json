@@ -1,0 +1,172 @@
+{
+  "name": "Compliance CNPJ - Volume Optimization Config",
+  "description": "Configurações progressivas para escalar o workflow conforme volume de CNPJs cresce",
+  "version": "1.0.0",
+  "thresholds": {
+    "low": {
+      "max_cnpjs": 50,
+      "description": "Configuração padrão (batchSize=1, sequencial)",
+      "batchSize": 1,
+      "concurrency": 1,
+      "delayBetweenBatchesMs": 0,
+      "timeoutMs": 10000,
+      "retry": {
+        "enabled": false
+      },
+      "estimatedDurationMinutes": 5
+    },
+    "medium": {
+      "max_cnpjs": 200,
+      "description": "Otimizado para 50-200 CNPJs (batchSize=3, concorrência controlada)",
+      "batchSize": 3,
+      "concurrency": 2,
+      "delayBetweenBatchesMs": 500,
+      "timeoutMs": 15000,
+      "retry": {
+        "enabled": true,
+        "maxAttempts": 2,
+        "backoffMs": 2000,
+        "retryOnStatusCodes": [429, 500, 502, 503, 504]
+      },
+      "estimatedDurationMinutes": 8
+    },
+    "high": {
+      "max_cnpjs": 1000,
+      "description": "Alto volume (queue mode + workers paralelos)",
+      "batchSize": 5,
+      "concurrency": 5,
+      "delayBetweenBatchesMs": 200,
+      "timeoutMs": 20000,
+      "retry": {
+        "enabled": true,
+        "maxAttempts": 3,
+        "backoffMs": 5000,
+        "backoffMultiplier": 2,
+        "retryOnStatusCodes": [429, 500, 502, 503, 504]
+      },
+      "queueMode": true,
+      "redisUrl": "redis://localhost:6379",
+      "estimatedDurationMinutes": 12
+    },
+    "enterprise": {
+      "max_cnpjs": 10000,
+      "description": "Volume enterprise (arquitetura event-driven separada)",
+      "architecture": "event_driven",
+      "components": {
+        "scheduler": "cron job → publica em queue (Redis/BullMQ)",
+        "workers": "N consumers paralelos (auto-scale K8s/HPA)",
+        "rateLimiter": "Token bucket (60 RPM BrasilAPI)",
+        "deadLetter": "Queue separada para falhas permanentes",
+        "monitoring": "Prometheus + Grafana + Alertmanager"
+      },
+      "estimatedDurationMinutes": "N/A (contínuo)"
+    }
+  },
+  "brasilapi_limits": {
+    "official_documented": "Não documentado publicamente",
+    "community_observed": "~60 req/min por IP",
+    "recommended_safe": 30,
+    "burst_allowed": 10,
+    "headers_to_watch": ["X-RateLimit-Limit", "X-RateLimit-Remaining", "Retry-After"]
+  },
+  "n8n_optimizations": {
+    "low": {
+      "nodes_to_modify": [
+        {
+          "name": "Loop 1 por 1",
+          "parameter": "batchSize",
+          "value": 1
+        }
+      ],
+      "code_node_changes": [
+        "// Manter validação simples"
+      ]
+    },
+    "medium": {
+      "nodes_to_modify": [
+        {
+          "name": "Loop 1 por 1",
+          "parameter": "batchSize",
+          "value": 3
+        },
+        {
+          "name": "Consultar BrasilAPI",
+          "parameter": "options.response.response.neverError",
+          "value": true
+        }
+      ],
+      "code_node_changes": [
+        "// Adicionar retry logic no code node",
+        "// Rate limit client-side: delay progressivo se 429"
+      ],
+      "new_nodes": [
+        "Rate Limit Token Bucket (Function node antes do HTTP Request)",
+        "Retry Wrapper (Function node com loop de retry)"
+      ]
+    },
+    "high": {
+      "requires_n8n_queue_mode": true,
+      "queue_config": {
+        "mode": "redis",
+        "redis": {
+          "host": "localhost",
+          "port": 6379,
+          "db": 0
+        },
+        "workers": 3
+      },
+      "workflow_split": {
+        "scheduler": "Workflow 1: Agenda + publica jobs na queue",
+        "processor": "Workflow 2: Consumer da queue (pode ter múltiplas instâncias)",
+        "callback": "Workflow 3: Recebe resultado + atualiza DB + alerta"
+      }
+    }
+  },
+  "monitoring_alerts": {
+    "low": [
+      "Workflow falhou (Error Trigger)"
+    ],
+    "medium": [
+      "Workflow falhou",
+      "Taxa de erro BrasilAPI > 10% em 1h",
+      "Duração execução > 15 min"
+    ],
+    "high": [
+      "Workflow falhou",
+      "Taxa de erro BrasilAPI > 5% em 30min",
+      "Queue depth > 100",
+      "Worker count < esperado",
+      "Latência P95 > 10s"
+    ]
+  },
+  "migration_checklist": {
+    "low_to_medium": [
+      "Aumentar batchSize para 3 no SplitInBatches",
+      "Adicionar Function node 'Rate Limiter' antes do HTTP Request",
+      "Implementar retry com backoff no Code node",
+      "Adicionar métrica de latência no log",
+      "Configurar alerta de taxa de erro no n8n"
+    ],
+    "medium_to_high": [
+      "Migrar n8n para Queue Mode (Redis)",
+      "Separar workflow em Scheduler + Processor + Callback",
+      "Implementar token bucket rate limiter compartilhado (Redis)",
+      "Adicionar Dead Letter Queue para falhas permanentes",
+      "Configurar auto-scale de workers (K8s HPA ou similar)",
+      "Implementar circuit breaker para BrasilAPI"
+    ],
+    "high_to_enterprise": [
+      "Migrar para arquitetura event-driven (Kafka/RabbitMQ)",
+      "Implementar múltiplos providers (BrasilAPI + ReceitaWS + fallback)",
+      "Adicionar cache de CNPJs consultados recentemente (Redis TTL 1h)",
+      "Implementar prioritização (clientes VIP primeiro)",
+      "Adicionar dashboard operacional em tempo real"
+    ]
+  },
+  "code_snippets": {
+    "rate_limiter_token_bucket": "// Function node: Rate Limiter (Redis)\nconst redis = require('ioredis');\nconst client = new redis($credentials.redisUrl);\n\nconst key = 'ratelimit:brasilapi';\nconst limit = 30; // req/min\nconst windowMs = 60000;\n\nconst current = await client.incr(key);\nif (current === 1) await client.pexpire(key, windowMs);\n\nif (current > limit) {\n  const ttl = await client.pttl(key);\n  await new Promise(r => setTimeout(r, ttl));\n  return { json: { ...$json, _rateLimited: true, waitMs: ttl } };\n}\n\nreturn { json: { ...$json, _rateLimited: false } };",
+    "retry_with_backoff": "// Code node: Retry Wrapper\nconst maxAttempts = 3;\nconst baseDelay = 2000;\nlet lastError;\n\nfor (let attempt = 1; attempt <= maxAttempts; attempt++) {\n  try {\n    const resp = await fetch($json.url, { timeout: 10000 });\n    if (resp.ok || ![429,500,502,503,504].includes(resp.status)) {\n      return { json: await resp.json() };\n    }\n    lastError = `HTTP ${resp.status}`;\n  } catch (err) {\n    lastError = err.message;\n  }\n  \n  if (attempt < maxAttempts) {\n    const delay = baseDelay * Math.pow(2, attempt - 1);\n    await new Promise(r => setTimeout(r, delay));\n  }\n}\n\nthrow new Error(`Falhou após ${maxAttempts} tentativas: ${lastError}`);",
+    "circuit_breaker": "// Function node: Circuit Breaker (Redis)\nconst client = new redis($credentials.redisUrl);\nconst key = 'circuit:brasilapi';\nconst failures = await client.get(key);\n\nif (failures && parseInt(failures) >= 5) {\n  const ttl = await client.ttl(key);\n  if (ttl > 0) {\n    throw new Error(`Circuit breaker OPEN. Tenta novamente em ${ttl}s`);\n  }\n}\n\n// Se chegou aqui, executa a requisição\n// No node seguinte (HTTP Request), no Error Trigger:\n// await client.incr(key); await client.expire(key, 60); // 5 falhas em 1min = open 1min",
+    "priority_queue": "// Scheduler: Prioriza clientes VIP\nconst { data: clientes } = await supabase\n  .from('compliance_clientes')\n  .select('id, cnpj, prioridade')\n  .eq('ativo', true)\n  .order('prioridade', { ascending: false }) // VIP primeiro\n  .order('ultima_checagem', { ascending: true }); // Mais antigos primeiro\n\n// Publica na queue com priority\nfor (const c of clientes) {\n  await queue.add('check-cnpj', c, { priority: c.prioridade || 0 });\n}"
+  }
+}

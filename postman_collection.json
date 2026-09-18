@@ -1,0 +1,550 @@
+{
+  "info": {
+    "name": "Compliance CNPJ - API Tests",
+    "description": "Collection Postman para testar BrasilAPI, n8n Webhook, Telegram Edge Function, Supabase REST",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "compliance-cnpj-api-tests"
+  },
+  "variable": [
+    {
+      "key": "supabase_url",
+      "value": "https://<SEU_PROJECT_REF>.supabase.co",
+      "type": "string"
+    },
+    {
+      "key": "supabase_anon_key",
+      "value": "<ANON_KEY>",
+      "type": "string"
+    },
+    {
+      "key": "supabase_service_key",
+      "value": "<SERVICE_ROLE_KEY>",
+      "type": "string"
+    },
+    {
+      "key": "n8n_webhook_url",
+      "value": "https://n8n.seudominio.com/webhook/compliance-check",
+      "type": "string"
+    },
+    {
+      "key": "telegram_webhook_url",
+      "value": "https://<SEU_PROJECT_REF>.supabase.co/functions/v1/telegram_webhook",
+      "type": "string"
+    },
+    {
+      "key": "brasilapi_base",
+      "value": "https://brasilapi.com.br/api/cnpj/v1",
+      "type": "string"
+    },
+    {
+      "key": "test_cnpj",
+      "value": "47960950000121",
+      "type": "string"
+    },
+    {
+      "key": "test_chat_id",
+      "value": "<SEU_CHAT_ID>",
+      "type": "string"
+    }
+  ],
+  "auth": {
+    "type": "noauth"
+  },
+  "item": [
+    {
+      "name": "🏥 Health Checks",
+      "item": [
+        {
+          "name": "Supabase - Health Check",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_anon_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/"
+          }
+        },
+        {
+          "name": "BrasilAPI - Health Check",
+          "request": {
+            "method": "GET",
+            "url": "https://brasilapi.com.br/api/cnpj/v1/47960950000121"
+          }
+        },
+        {
+          "name": "Telegram Bot - GetMe",
+          "request": {
+            "method": "GET",
+            "url": "https://api.telegram.org/bot<BOT_TOKEN>/getMe"
+          }
+        },
+        {
+          "name": "n8n - Health Check",
+          "request": {
+            "method": "GET",
+            "url": "https://n8n.seudominio.com/healthz"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🇧🇷 BrasilAPI",
+      "item": [
+        {
+          "name": "Consultar CNPJ Válido (Magazine Luiza)",
+          "request": {
+            "method": "GET",
+            "url": "{{brasilapi_base}}/{{test_cnpj}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Tem descricao_situacao_cadastral', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.descricao_situacao_cadastral).to.exist;",
+                  "});",
+                  "pm.test('CNPJ confere', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.cnpj).to.equal(pm.variables.get('test_cnpj'));",
+                  "});",
+                  "pm.test('Latência < 3s', () => pm.expect(pm.response.responseTime).to.be.below(3000));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar CNPJ Inválido (404 esperado)",
+          "request": {
+            "method": "GET",
+            "url": "{{brasilapi_base}}/00000000000000"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Consultar CNPJ Formato Inválido",
+          "request": {
+            "method": "GET",
+            "url": "{{brasilapi_base}}/abc"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 400 ou 404', () => {",
+                  "  pm.expect([400, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Rate Limit Test - 10 reqs rápidas",
+          "request": {
+            "method": "GET",
+            "url": "{{brasilapi_base}}/{{test_cnpj}}"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Não recebeu 429', () => pm.expect(pm.response.code).to.not.equal(429));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "🗄️ Supabase REST API",
+      "item": [
+        {
+          "name": "Listar Clientes Ativos",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" },
+              { "key": "Accept", "value": "application/json" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/compliance_clientes?ativo=eq.true&select=id,nome,cnpj,status_atual,telegram_chat_id,ultima_checagem,ultima_checagem_ok"
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Retorna array', () => pm.expect(pm.response.json()).to.be.an('array'));",
+                  "pm.test('Todos ativos', () => {",
+                  "  const data = pm.response.json();",
+                  "  data.forEach(c => pm.expect(c.ativo).to.be.true);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Buscar Cliente por CNPJ",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/compliance_clientes?cnpj=eq.{{test_cnpj}}&select=*"
+          }
+        },
+        {
+          "name": "Criar Cliente de Teste",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" },
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Prefer", "value": "return=representation" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/compliance_clientes",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"nome\": \"Empresa Teste Postman\",\n  \"cnpj\": \"12345678000195\",\n  \"telegram_chat_id\": \"{{test_chat_id}}\",\n  \"ativo\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 201', () => pm.response.to.have.status(201));",
+                  "pm.test('Retorna cliente criado', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json[0].cnpj).to.equal('12345678000195');",
+                  "  pm.variables.set('created_client_id', json[0].id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Atualizar Status Cliente",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/compliance_clientes?id=eq.{{created_client_id}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"status_atual\": \"SUSPENSA\",\n  \"ultima_checagem\": \"{{$isoTimestamp}}\",\n  \"ultima_checagem_ok\": true\n}"
+            }
+          }
+        },
+        {
+          "name": "Ver Logs de Checagem",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/compliance_checks_log?cliente_id=eq.{{created_client_id}}&order=data_checagem.desc&limit=10"
+          }
+        },
+        {
+          "name": "View Dashboard - Resumo",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_resumo"
+          }
+        },
+        {
+          "name": "View Dashboard - Clientes Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_clientes_status"
+          }
+        },
+        {
+          "name": "View Dashboard - Mudanças Recentes",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_mudancas_recentes"
+          }
+        }
+      ]
+    },
+    {
+      "name": "🤖 Telegram Edge Function",
+      "item": [
+        {
+          "name": "/start",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 1,\n  \"message\": {\n    \"message_id\": 1,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/start\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('Resposta ok', () => pm.expect(pm.response.json().ok).to.be.true);"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "/cadastrar CNPJ",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 2,\n  \"message\": {\n    \"message_id\": 2,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/cadastrar 33000167000101 Petrobras\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "/listar",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 3,\n  \"message\": {\n    \"message_id\": 3,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/listar\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "/status CNPJ",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 4,\n  \"message\": {\n    \"message_id\": 4,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/status {{test_cnpj}}\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "/remover CNPJ",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 5,\n  \"message\": {\n    \"message_id\": 5,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/remover 12345678000195\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          }
+        },
+        {
+          "name": "Comando Inválido",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{telegram_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"update_id\": 6,\n  \"message\": {\n    \"message_id\": 6,\n    \"from\": { \"id\": {{test_chat_id}}, \"username\": \"testuser\" },\n    \"chat\": { \"id\": {{test_chat_id}}, \"type\": \"private\" },\n    \"text\": \"/invalido\",\n    \"date\": {{timestamp}}\n  }\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "⚙️ n8n Webhook",
+      "item": [
+        {
+          "name": "Trigger Workflow Manual",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{n8n_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cnpj\": \"{{test_cnpj}}\",\n  \"cliente_id\": \"test-manual-{{$guid}}\",\n  \"cliente_nome\": \"Teste Manual Postman\",\n  \"telegram_chat_id\": \"{{test_chat_id}}\",\n  \"status_anterior\": \"ATIVA\",\n  \"force_check\": true\n}"
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('Status 200 ou 202', () => pm.expect([200, 202]).to.include(pm.response.code));",
+                  "pm.test('Retorna executionId', () => {",
+                  "  const json = pm.response.json();",
+                  "  pm.expect(json.executionId).to.exist;",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Trigger com CNPJ Inválido",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": "{{n8n_webhook_url}}",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"cnpj\": \"abc\",\n  \"cliente_id\": \"test-invalid-{{$guid}}\",\n  \"cliente_nome\": \"Teste Inválido\",\n  \"telegram_chat_id\": \"{{test_chat_id}}\",\n  \"force_check\": true\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "📊 Dashboard Views (SQL Direto via PostgREST)",
+      "item": [
+        {
+          "name": "Resumo Geral (v_dashboard_resumo)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_resumo"
+          }
+        },
+        {
+          "name": "Clientes com Health Status",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_clientes_status"
+          }
+        },
+        {
+          "name": "Últimas 50 Mudanças",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_mudancas_recentes"
+          }
+        },
+        {
+          "name": "Erros BrasilAPI (24h)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_erros_brasilapi"
+          }
+        },
+        {
+          "name": "Performance BrasilAPI (7 dias)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_brasilapi_performance"
+          }
+        },
+        {
+          "name": "Taxa de Sucesso Alertas (30 dias)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_alertas"
+          }
+        },
+        {
+          "name": "SLA Checagens",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "apikey", "value": "{{supabase_service_key}}" },
+              { "key": "Authorization", "value": "Bearer {{supabase_service_key}}" }
+            ],
+            "url": "{{supabase_url}}/rest/v1/v_dashboard_sla_checagens"
+          }
+        }
+      ]
+    }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "exec": [
+          "// Auto-generate timestamp for Telegram tests",
+          "pm.variables.set('timestamp', Math.floor(Date.now() / 1000).toString());"
+        ]
+      }
+    }
+  ]
+}

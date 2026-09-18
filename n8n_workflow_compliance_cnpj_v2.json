@@ -1,0 +1,509 @@
+{
+  "name": "AgiloNex - Monitor de Compliance CNPJ v2 (Telegram)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Todo dia às 8h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1200, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "compliance_clientes",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "ativo",
+              "condition": "eq",
+              "keyValue": "true"
+            }
+          ]
+        },
+        "options": {
+          "columns": [
+            "id",
+            "nome",
+            "cnpj",
+            "telegram_chat_id",
+            "status_atual",
+            "ultima_checagem",
+            "ultima_checagem_ok"
+          ]
+        }
+      },
+      "id": "get-clientes",
+      "name": "Buscar clientes ativos (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-960, 0],
+      "notes": "Credencial: supabaseApi (service_role). Seleciona apenas colunas necessárias.",
+      "credentials": {
+        "supabaseApi": "supabaseApi"
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-batches",
+      "name": "Loop 1 por 1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-720, 0],
+      "notes": "batchSize=1 evita estourar rate limit da BrasilAPI. Se a base crescer (>50), aumentar aos poucos e monitorar erros 429."
+    },
+    {
+      "parameters": {
+        "url": "=https://brasilapi.com.br/api/cnpj/v1/{{$json.cnpj}}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "http-brasilapi",
+      "name": "Consultar BrasilAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 0],
+      "notes": "neverError=true pra tratar 404/erro no Code node abaixo em vez de quebrar o workflow. Timeout 10s."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Validação e comparação de status da BrasilAPI\nconst cliente = $('Loop 1 por 1').item.json;\nconst resp = $input.item.json;\nconst startTime = Date.now();\n\n// 1. Validar CNPJ (14 dígitos)\nconst cnpj = cliente.cnpj?.replace(/\\D/g, '');\nif (!/^\\d{14}$/.test(cnpj)) {\n  console.warn(`CNPJ inválido ignorado: ${cliente.cnpj}`);\n  return {\n    json: {\n      ...cliente,\n      cnpj,\n      pular: true,\n      erro: 'CNPJ inválido (não tem 14 dígitos)',\n      latency_ms: Date.now() - startTime\n    }\n  };\n}\n\n// 2. Verificar se resposta da BrasilAPI tem dados válidos\nconst encontrado = resp.descricao_situacao_cadastral !== undefined;\nconst httpStatus = $input.item.json?.__httpStatus || 200;\n\nif (!encontrado) {\n  // 404 ou erro — NÃO significa irregularidade. Marca pra checagem manual.\n  return {\n    json: {\n      ...cliente,\n      cnpj,\n      cliente_id: cliente.id,\n      status_anterior: cliente.status_atual,\n      status_novo: null,\n      mudou: false,\n      encontrado: false,\n      http_status: httpStatus,\n      raw_response: resp,\n      latency_ms: Date.now() - startTime\n    }\n  };\n}\n\n// 3. Comparar status\nconst statusNovo = resp.descricao_situacao_cadastral;\nconst statusAnterior = cliente.status_atual;\nconst mudou = statusAnterior !== null && statusAnterior !== undefined && statusAnterior !== statusNovo;\n\nreturn {\n  json: {\n    ...cliente,\n    cnpj,\n    cliente_id: cliente.id,\n    cliente_nome: cliente.nome,\n    telegram_chat_id: cliente.telegram_chat_id,\n    status_anterior: statusAnterior,\n    status_novo: statusNovo,\n    mudou: mudou,\n    encontrado: true,\n    http_status: httpStatus,\n    raw_response: resp,\n    latency_ms: Date.now() - startTime\n  }\n};"
+      },
+      "id": "code-compare",
+      "name": "Comparar status + validar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.pular}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-pular",
+      "name": "Pular inválido?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [0, -120]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.mudou}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-mudou",
+      "name": "Status mudou?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [0, 120]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{$credentials.telegramApi}}/sendMessage",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{$json.telegram_chat_id}}\",\n  \"text\": \"⚠️ <b>Alerta de Compliance CNPJ</b>\\n\\n🏢 <b>{{$json.cliente_nome}}</b>\\n🔢 CNPJ: <code>{{$json.cnpj}}</code>\\n📊 Status: <b>{{$json.status_anterior || '—'}}</b> → <b>{{$json.status_novo}}</b>\\n\\n⏰ Detectado em: {{new Date().toLocaleString('pt-BR')}}\\n\\n🔍 Recomendamos verificar a regularização o quanto antes.\",\n  \"parse_mode\": \"HTML\"\n}"
+      },
+      "id": "http-telegram",
+      "name": "Enviar Alerta Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, -120],
+      "notes": "Credencial: telegramApi (Bearer token). Envia mensagem formatada em HTML.",
+      "credentials": {
+        "httpHeaderAuth": "telegramApi"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "compliance_clientes",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.cliente_id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status_atual",
+              "fieldValue": "={{$json.status_novo}}"
+            },
+            {
+              "fieldId": "ultima_checagem",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "ultima_checagem_ok",
+              "fieldValue": "={{$json.encontrado}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-update",
+      "name": "Atualizar cliente (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [240, 120],
+      "notes": "Atualiza status_atual, ultima_checagem e ultima_checagem_ok. Credencial: supabaseApi.",
+      "credentials": {
+        "supabaseApi": "supabaseApi"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "compliance_clientes",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.cliente_id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "ultima_checagem",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "ultima_checagem_ok",
+              "fieldValue": "={{$json.encontrado}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-update-no-change",
+      "name": "Atualizar cliente (sem mudança)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [240, 240],
+      "notes": "Quando não há mudança de status, só atualiza timestamp e ok. Credencial: supabaseApi.",
+      "credentials": {
+        "supabaseApi": "supabaseApi"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "compliance_checks_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "cliente_id",
+              "fieldValue": "={{$json.cliente_id}}"
+            },
+            {
+              "fieldId": "status_anterior",
+              "fieldValue": "={{$json.status_anterior}}"
+            },
+            {
+              "fieldId": "status_novo",
+              "fieldValue": "={{$json.status_novo}}"
+            },
+            {
+              "fieldId": "mudou",
+              "fieldValue": "={{$json.mudou}}"
+            },
+            {
+              "fieldId": "alerta_enviado",
+              "fieldValue": "={{$json.mudou}}"
+            },
+            {
+              "fieldId": "raw_response",
+              "fieldValue": "={{JSON.stringify($json.raw_response)}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-log",
+      "name": "Registrar no log (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [480, 0],
+      "notes": "Grava log completo da checagem. alerta_enviado=true apenas se mudou. Credencial: supabaseApi.",
+      "credentials": {
+        "supabaseApi": "supabaseApi"
+      }
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "compliance_checks_log",
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "cliente_id",
+              "fieldValue": "={{$json.cliente_id}}"
+            },
+            {
+              "fieldId": "status_anterior",
+              "fieldValue": "={{$json.status_anterior}}"
+            },
+            {
+              "fieldId": "status_novo",
+              "fieldValue": "={{$json.status_novo}}"
+            },
+            {
+              "fieldId": "mudou",
+              "fieldValue": "={{$json.mudou}}"
+            },
+            {
+              "fieldId": "alerta_enviado",
+              "fieldValue": false
+            },
+            {
+              "fieldId": "raw_response",
+              "fieldValue": "={{JSON.stringify($json.raw_response)}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-log-no-change",
+      "name": "Registrar log (sem alerta)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [480, 240],
+      "notes": "Log para CNPJs pulados ou sem mudança. alerta_enviado=false. Credencial: supabaseApi.",
+      "credentials": {
+        "supabaseApi": "supabaseApi"
+      }
+    },
+    {
+      "parameters": {},
+      "id": "loop-back",
+      "name": "Voltar pro loop",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [720, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.encontrado}}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-not-found",
+      "name": "Não encontrado (404/erro)?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [0, 240]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{$credentials.telegramApi}}/sendMessage",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"{{$json.telegram_chat_id}}\",\n  \"text\": \"⚠️ <b>Aviso: CNPJ não encontrado na BrasilAPI</b>\\n\\n🏢 <b>{{$json.cliente_nome}}</b>\\n🔢 CNPJ: <code>{{$json.cnpj}}</code>\\n📊 Status anterior: <b>{{$json.status_anterior || '—'}}</b>\\n🌐 HTTP: {{$json.http_status}}\\n\\n⚠️ Isso <b>NÃO</b> significa irregularidade — pode ser instabilidade da API.\\nVerifique manualmente em: https://brasilapi.com.br/api/cnpj/v1/{{$json.cnpj}}\",\n  \"parse_mode\": \"HTML\"\n}"
+      },
+      "id": "http-telegram-not-found",
+      "name": "Avisar: não encontrado",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, 360],
+      "notes": "Alerta quando BrasilAPI retorna 404/erro. Não marca como irregularidade, só avisa para verificação manual. Credencial: telegramApi.",
+      "credentials": {
+        "httpHeaderAuth": "telegramApi"
+      }
+    },
+    {
+      "parameters": {},
+      "id": "error-trigger",
+      "name": "Error Trigger (Falha no Workflow)",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-1200, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.telegram.org/bot{{$credentials.telegramApi}}/sendMessage",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"chat_id\": \"SEU_CHAT_ID_AQUI\",\n  \"text\": \"🚨 <b>FALHA NO WORKFLOW COMPLIANCE CNPJ</b>\\n\\n❌ Erro: {{$json.error?.message || 'Desconhecido'}}\\n📍 Node: {{($json.node?.name || 'N/A')}}\\n⏰ {{new Date().toLocaleString('pt-BR')}}\\n\\nVerifique execução no n8n: https://n8n.seudominio.com\",\n  \"parse_mode\": \"HTML\"\n}"
+      },
+      "id": "http-telegram-error",
+      "name": "Alertar Erro no Workflow",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-960, 300],
+      "notes": "SUBSTITUA SEU_CHAT_ID_AQUI pelo seu chat_id real. Credencial: telegramApi.",
+      "credentials": {
+        "httpHeaderAuth": "telegramApi"
+      }
+    }
+  ],
+  "connections": {
+    "Todo dia às 8h": {
+      "main": [[{ "node": "Buscar clientes ativos (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Buscar clientes ativos (Supabase)": {
+      "main": [[{ "node": "Loop 1 por 1", "type": "main", "index": 0 }]]
+    },
+    "Loop 1 por 1": {
+      "main": [[{ "node": "Consultar BrasilAPI", "type": "main", "index": 0 }]]
+    },
+    "Consultar BrasilAPI": {
+      "main": [[{ "node": "Comparar status + validar", "type": "main", "index": 0 }]]
+    },
+    "Comparar status + validar": {
+      "main": [[{ "node": "Pular inválido?", "type": "main", "index": 0 }]]
+    },
+    "Pular inválido?": {
+      "main": [
+        [{ "node": "Registrar log (sem alerta)", "type": "main", "index": 0 }],
+        [{ "node": "Não encontrado (404/erro)?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Não encontrado (404/erro)?": {
+      "main": [
+        [{ "node": "Avisar: não encontrado", "type": "main", "index": 0 }, { "node": "Atualizar cliente (Supabase)", "type": "main", "index": 0 }],
+        [{ "node": "Atualizar cliente (Supabase)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Status mudou?": {
+      "main": [
+        [{ "node": "Enviar Alerta Telegram", "type": "main", "index": 0 }, { "node": "Atualizar cliente (Supabase)", "type": "main", "index": 0 }],
+        [{ "node": "Atualizar cliente (sem mudança)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enviar Alerta Telegram": {
+      "main": [[{ "node": "Registrar no log (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Avisar: não encontrado": {
+      "main": [[{ "node": "Registrar no log (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Atualizar cliente (Supabase)": {
+      "main": [[{ "node": "Registrar no log (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Atualizar cliente (sem mudança)": {
+      "main": [[{ "node": "Registrar log (sem alerta)", "type": "main", "index": 0 }]]
+    },
+    "Registrar no log (Supabase)": {
+      "main": [[{ "node": "Voltar pro loop", "type": "main", "index": 0 }]]
+    },
+    "Registrar log (sem alerta)": {
+      "main": [[{ "node": "Voltar pro loop", "type": "main", "index": 0 }]]
+    },
+    "Voltar pro loop": {
+      "main": [[{ "node": "Loop 1 por 1", "type": "main", "index": 0 }]]
+    },
+    "Error Trigger (Falha no Workflow)": {
+      "main": [[{ "node": "Alertar Erro no Workflow", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "Error Trigger (Falha no Workflow)"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "compliance-cnpj-v2"
+  }
+}

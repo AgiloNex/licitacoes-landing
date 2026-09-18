@@ -1,0 +1,249 @@
+{
+  "name": "AgiloNex - Monitor de Compliance CNPJ",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 8
+            }
+          ]
+        }
+      },
+      "id": "trigger-schedule",
+      "name": "Todo dia às 8h",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [-1200, 0]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "compliance_clientes",
+        "returnAll": true,
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "ativo",
+              "condition": "eq",
+              "keyValue": "true"
+            }
+          ]
+        }
+      },
+      "id": "get-clientes",
+      "name": "Buscar clientes ativos (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [-960, 0],
+      "notes": "Ajustar credencial Supabase e nome exato da tabela/coluna conforme seu projeto."
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "split-batches",
+      "name": "Loop 1 por 1",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [-720, 0],
+      "notes": "batchSize=1 evita estourar rate limit da BrasilAPI. Se a base crescer muito, aumentar aos poucos e monitorar erros 429."
+    },
+    {
+      "parameters": {
+        "url": "=https://brasilapi.com.br/api/cnpj/v1/{{$json.cnpj}}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true,
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 10000
+        }
+      },
+      "id": "http-brasilapi",
+      "name": "Consultar BrasilAPI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [-480, 0],
+      "notes": "neverError=true pra tratar 404 manualmente no Code node abaixo em vez de quebrar o workflow."
+    },
+    {
+      "parameters": {
+        "jsCode": "// Trata resposta da BrasilAPI e compara com o status salvo\nconst cliente = $('Loop 1 por 1').item.json;\nconst resp = $input.item.json;\n\nconst encontrado = resp.descricao_situacao_cadastral !== undefined;\n\nif (!encontrado) {\n  // 404 ou erro — NÃO significa irregularidade. Marca pra checagem manual.\n  return {\n    json: {\n      cliente_id: cliente.id,\n      cnpj: cliente.cnpj,\n      whatsapp_number: cliente.whatsapp_number,\n      status_anterior: cliente.status_atual,\n      status_novo: null,\n      mudou: false,\n      encontrado: false,\n      raw_response: resp\n    }\n  };\n}\n\nconst statusNovo = resp.descricao_situacao_cadastral;\nconst statusAnterior = cliente.status_atual;\nconst mudou = statusAnterior !== null && statusAnterior !== undefined && statusAnterior !== statusNovo;\n\nreturn {\n  json: {\n    cliente_id: cliente.id,\n    cliente_nome: cliente.nome,\n    cnpj: cliente.cnpj,\n    whatsapp_number: cliente.whatsapp_number,\n    status_anterior: statusAnterior,\n    status_novo: statusNovo,\n    mudou: mudou,\n    encontrado: true,\n    raw_response: resp\n  }\n};"
+      },
+      "id": "code-compare",
+      "name": "Comparar status",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [-240, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "leftValue": "={{$json.mudou}}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "if-mudou",
+      "name": "Status mudou?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "url": "=https://SEU_DOMINIO_EVOLUTION/message/sendText/SEU_INSTANCE",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "apikey",
+              "value": "SUA_API_KEY_EVOLUTION"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"number\": \"{{$json.whatsapp_number}}\",\n  \"text\": \"⚠️ Alerta de compliance: a situação cadastral do CNPJ {{$json.cnpj}} mudou de '{{$json.status_anterior}}' para '{{$json.status_novo}}'. Recomendamos verificar a regularização o quanto antes.\"\n}"
+      },
+      "id": "http-evolution",
+      "name": "Enviar alerta WhatsApp (Evolution API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [240, -120],
+      "notes": "Substituir URL, instance e apikey pela sua Evolution API já em produção na AgiloNex."
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "tableId": "compliance_clientes",
+        "filters": {
+          "conditions": [
+            {
+              "keyName": "id",
+              "condition": "eq",
+              "keyValue": "={{$json.cliente_id}}"
+            }
+          ]
+        },
+        "fieldsUi": {
+          "fieldValues": [
+            {
+              "fieldId": "status_atual",
+              "fieldValue": "={{$json.status_novo}}"
+            },
+            {
+              "fieldId": "ultima_checagem",
+              "fieldValue": "={{$now.toISO()}}"
+            },
+            {
+              "fieldId": "ultima_checagem_ok",
+              "fieldValue": "={{$json.encontrado}}"
+            }
+          ]
+        }
+      },
+      "id": "supabase-update",
+      "name": "Atualizar cliente (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [240, 120]
+    },
+    {
+      "parameters": {
+        "operation": "create",
+        "tableId": "compliance_checks_log",
+        "fieldsUi": {
+          "fieldValues": [
+            { "fieldId": "cliente_id", "fieldValue": "={{$json.cliente_id}}" },
+            { "fieldId": "status_anterior", "fieldValue": "={{$json.status_anterior}}" },
+            { "fieldId": "status_novo", "fieldValue": "={{$json.status_novo}}" },
+            { "fieldId": "mudou", "fieldValue": "={{$json.mudou}}" },
+            { "fieldId": "alerta_enviado", "fieldValue": "={{$json.mudou}}" },
+            { "fieldId": "raw_response", "fieldValue": "={{JSON.stringify($json.raw_response)}}" }
+          ]
+        }
+      },
+      "id": "supabase-log",
+      "name": "Registrar no log (Supabase)",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {},
+      "id": "loop-back",
+      "name": "Voltar pro loop",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [720, 0]
+    }
+  ],
+  "connections": {
+    "Todo dia às 8h": {
+      "main": [[{ "node": "Buscar clientes ativos (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Buscar clientes ativos (Supabase)": {
+      "main": [[{ "node": "Loop 1 por 1", "type": "main", "index": 0 }]]
+    },
+    "Loop 1 por 1": {
+      "main": [
+        [{ "node": "Consultar BrasilAPI", "type": "main", "index": 0 }]
+      ]
+    },
+    "Consultar BrasilAPI": {
+      "main": [[{ "node": "Comparar status", "type": "main", "index": 0 }]]
+    },
+    "Comparar status": {
+      "main": [[{ "node": "Status mudou?", "type": "main", "index": 0 }]]
+    },
+    "Status mudou?": {
+      "main": [
+        [
+          { "node": "Enviar alerta WhatsApp (Evolution API)", "type": "main", "index": 0 },
+          { "node": "Atualizar cliente (Supabase)", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Atualizar cliente (Supabase)", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Enviar alerta WhatsApp (Evolution API)": {
+      "main": [[{ "node": "Registrar no log (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Atualizar cliente (Supabase)": {
+      "main": [[{ "node": "Registrar no log (Supabase)", "type": "main", "index": 0 }]]
+    },
+    "Registrar no log (Supabase)": {
+      "main": [[{ "node": "Voltar pro loop", "type": "main", "index": 0 }]]
+    },
+    "Voltar pro loop": {
+      "main": [[{ "node": "Loop 1 por 1", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
